@@ -16,6 +16,7 @@
         <span id="ikonRekam">🎤</span> <span id="teksRekam">Mulai Rekam Suara</span>
       </button>
       <p id="statusRekaman" class="text-xs text-gray-500 italic text-center">Tombol biru: Sistem siap merekam.</p>
+      <p id="infoSTT" class="text-xs text-center mt-1 text-gray-500"></p>
     </div>
 
     <!-- Form Ketikan (Menerima input suara otomatis atau ketik manual) -->
@@ -49,43 +50,71 @@
     let audioMemproses = false; // true selama audio sedang diubah ke base64 setelah rekaman berhenti
     let isRecording = false;
     let recognition;
-    let sttBlocked = false; // true jika speech-to-text ditolak, supaya tidak restart berulang
+    let sttBlocked = false; // true jika speech-to-text gagal, supaya tidak restart berulang
+    let teksAwal = "";      // isi kotak catatan sebelum rekaman dimulai
+    let teksFinal = "";     // hasil pengenalan suara yang sudah pasti
+
+    // Baris info khusus pengenalan suara (tidak tertimpa status rekaman)
+    function setInfoSTT(pesan, kelas) {
+      const el = document.getElementById('infoSTT');
+      el.innerText = pesan;
+      el.className = 'text-xs text-center mt-1 ' + (kelas || 'text-gray-500');
+    }
+
+    // Tulis awal + hasil pasti + teks sementara ke kotak catatan
+    function tulisKeKotak(sementara) {
+      const gabung = [teksAwal, teksFinal, (sementara || '').trim()].filter(Boolean).join(' ');
+      document.getElementById('catatan').value = gabung;
+    }
 
     // Setup Web Speech API untuk mengubah Suara ke Teks (Speech-to-Text)
     if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       recognition = new SpeechRecognition();
       recognition.continuous = true;
-      recognition.interimResults = false;
+      recognition.interimResults = true; // tampilkan teks sementara selagi bicara
       recognition.lang = 'id-ID'; // Menggunakan bahasa Indonesia
 
+      recognition.onstart = function() {
+        setInfoSTT('🎙️ Pengenalan suara aktif, silakan bicara...');
+      };
+
+      recognition.onspeechstart = function() {
+        setInfoSTT('🗣️ Suara terdeteksi...');
+      };
+
       recognition.onresult = function(event) {
-        let transkrip = '';
+        let sementara = '';
         for (let i = event.resultIndex; i < event.results.length; ++i) {
-          if (event.results[i].isFinal) {
-            transkrip += event.results[i][0].transcript;
+          const hasil = event.results[i];
+          if (hasil.isFinal) {
+            teksFinal += (teksFinal ? ' ' : '') + hasil[0].transcript.trim();
+          } else {
+            sementara += hasil[0].transcript;
           }
         }
-        if (transkrip !== '') {
-          const catatanBox = document.getElementById('catatan');
-          // Tambahkan teks baru ke dalam box dengan spasi jika sudah ada isinya
-          catatanBox.value += (catatanBox.value ? ' ' : '') + transkrip;
-        }
+        tulisKeKotak(sementara);
       };
 
       recognition.onerror = function(event) {
-        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-          sttBlocked = true;
-        }
-        if (event.error !== 'no-speech' && event.error !== 'aborted') {
-          document.getElementById('statusRekaman').innerText = '⚠️ Pengenalan suara: ' + event.error;
-        }
+        if (event.error === 'no-speech' || event.error === 'aborted') return;
+        sttBlocked = true; // hentikan restart otomatis supaya tidak berputar terus
+        const arti = {
+          'not-allowed': 'izin mikrofon untuk pengenalan suara ditolak.',
+          'service-not-allowed': 'layanan pengenalan suara tidak diizinkan di browser ini.',
+          'network': 'tidak bisa terhubung ke layanan pengenalan suara Google (cek internet atau jaringan kantor).',
+          'audio-capture': 'mikrofon tidak bisa dipakai oleh pengenalan suara.',
+          'language-not-supported': 'bahasa tidak didukung.'
+        };
+        setInfoSTT('⚠️ Pengenalan suara gagal (' + event.error + ')' + (arti[event.error] ? ': ' + arti[event.error] : ''), 'text-red-600');
       };
 
       // Chrome menghentikan pengenalan suara sendiri setelah jeda diam -> nyalakan lagi selama masih merekam
       recognition.onend = function() {
         if (isRecording && !sttBlocked) {
           try { recognition.start(); } catch (e) { /* abaikan jika sudah berjalan */ }
+        } else if (!isRecording && !sttBlocked && !teksFinal) {
+          setInfoSTT('Tidak ada ucapan yang dikenali. Coba bicara lebih jelas dan lebih lama, lalu tunggu 2-3 detik sebelum berhenti.', 'text-amber-600');
         }
       };
     }
@@ -147,10 +176,18 @@
 
           // Speech-to-text dipisah: kalau gagal, rekaman audio tetap jalan
           sttBlocked = false;
-          try {
-            if (recognition) recognition.start();
-          } catch (e) {
-            console.warn('Speech-to-text gagal dimulai:', e);
+          teksAwal = document.getElementById('catatan').value.trim();
+          teksFinal = "";
+          setInfoSTT('');
+          if (!recognition) {
+            setInfoSTT('⚠️ Browser ini tidak mendukung pengenalan suara. Gunakan Google Chrome.', 'text-red-600');
+          } else {
+            try {
+              recognition.start();
+            } catch (e) {
+              console.warn('Speech-to-text gagal dimulai:', e);
+              setInfoSTT('⚠️ Pengenalan suara gagal dimulai: ' + e.message, 'text-red-600');
+            }
           }
 
           isRecording = true;
