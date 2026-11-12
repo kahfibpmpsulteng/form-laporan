@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Form Laporan Suara</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 p-8 flex items-center justify-center min-h-screen">
+  <div class="w-full max-w-md bg-white rounded-xl shadow-lg p-6">
+    <h1 class="text-2xl font-bold mb-6 text-gray-800 text-center">Form Laporan</h1>
+
+    <!-- Tombol Rekam (Sistem Toggle Biru / Merah) -->
+    <div class="mb-4">
+      <button id="btnRekam" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 px-6 rounded-lg w-full mb-2 transition-all duration-300 flex justify-center items-center gap-2 shadow-md" onclick="toggleRekam()">
+        <span id="ikonRekam">🎤</span> <span id="teksRekam">Mulai Rekam Suara</span>
+      </button>
+      <p id="statusRekaman" class="text-xs text-gray-500 italic text-center">Tombol biru: Sistem siap merekam.</p>
+    </div>
+
+    <!-- Form Ketikan (Menerima input suara otomatis atau ketik manual) -->
+    <div class="mb-4">
+      <label class="block text-gray-700 text-sm font-bold mb-2">Hasil Catatan Teks</label>
+      <textarea id="catatan" rows="4" class="w-full border border-gray-300 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-shadow" placeholder="Suara Anda akan otomatis diubah menjadi teks di sini. Anda juga bisa mengetik atau mengeditnya manual..."></textarea>
+    </div>
+
+    <!-- Pemutar Audio (Muncul setelah rekaman selesai) -->
+    <div class="mb-6">
+      <audio id="audioPlayback" controls class="w-full hidden rounded-lg border border-gray-200"></audio>
+    </div>
+
+    <!-- Tombol Kirim -->
+    <button id="btnKirim" class="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded-lg w-full shadow-md transition-colors" onclick="kirimData()">
+      Kirim Data
+    </button>
+
+    <!-- Status Pesan -->
+    <p id="pesanSistem" class="mt-4 text-center text-sm font-semibold"></p>
+  </div>
+
+  <script>
+    // ====== PENGATURAN: ganti dengan URL web app Apps Script Anda (berakhiran /exec) ======
+    const API_URL = 'https://script.google.com/macros/s/AKfycbyFY53p-XCqhyxWfCUplPZKhHuh4i1ohcb8uyKEjeqG6K_DRLDc-3uHdCnqpd7VR1n8LQ/exec';
+    // ======================================================================================
+
+    let mediaRecorder;
+    let audioChunks = [];
+    let audioBase64 = "";
+    let audioMemproses = false; // true selama audio sedang diubah ke base64 setelah rekaman berhenti
+    let isRecording = false;
+    let recognition;
+    let sttBlocked = false; // true jika speech-to-text ditolak, supaya tidak restart berulang
+
+    // Setup Web Speech API untuk mengubah Suara ke Teks (Speech-to-Text)
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = false;
+      recognition.lang = 'id-ID'; // Menggunakan bahasa Indonesia
+
+      recognition.onresult = function(event) {
+        let transkrip = '';
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) {
+            transkrip += event.results[i][0].transcript;
+          }
+        }
+        if (transkrip !== '') {
+          const catatanBox = document.getElementById('catatan');
+          // Tambahkan teks baru ke dalam box dengan spasi jika sudah ada isinya
+          catatanBox.value += (catatanBox.value ? ' ' : '') + transkrip;
+        }
+      };
+
+      recognition.onerror = function(event) {
+        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+          sttBlocked = true;
+        }
+        if (event.error !== 'no-speech' && event.error !== 'aborted') {
+          document.getElementById('statusRekaman').innerText = '⚠️ Pengenalan suara: ' + event.error;
+        }
+      };
+
+      // Chrome menghentikan pengenalan suara sendiri setelah jeda diam -> nyalakan lagi selama masih merekam
+      recognition.onend = function() {
+        if (isRecording && !sttBlocked) {
+          try { recognition.start(); } catch (e) { /* abaikan jika sudah berjalan */ }
+        }
+      };
+    }
+
+    // Pilih format audio yang didukung browser (Chrome/Android: webm, Safari: mp4)
+    function pilihFormatAudio() {
+      const kandidat = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
+      for (const f of kandidat) {
+        if (window.MediaRecorder && MediaRecorder.isTypeSupported(f)) return f;
+      }
+      return '';
+    }
+
+    async function toggleRekam() {
+      const btnRekam = document.getElementById('btnRekam');
+      const status = document.getElementById('statusRekaman');
+      const teksRekam = document.getElementById('teksRekam');
+      const ikonRekam = document.getElementById('ikonRekam');
+
+      // JIKA SEDANG TIDAK MEREKAM -> MULAI REKAM
+      if (!isRecording) {
+        let stream;
+        try {
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            throw new Error('Perekaman suara butuh alamat https:// (bukan http://).');
+          }
+          stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+          const format = pilihFormatAudio();
+          const opsi = { audioBitsPerSecond: 32000 }; // 32 kbps: cukup jernih untuk suara, file kecil
+          if (format) opsi.mimeType = format;
+          mediaRecorder = new MediaRecorder(stream, opsi);
+          audioChunks = [];
+
+          // Rekaman baru: buang audio lama supaya tidak terkirim tertukar
+          audioBase64 = "";
+          document.getElementById('audioPlayback').classList.add('hidden');
+
+          mediaRecorder.ondataavailable = event => {
+            if (event.data.size > 0) audioChunks.push(event.data);
+          };
+
+          mediaRecorder.onstop = () => {
+            const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+            const audioUrl = URL.createObjectURL(audioBlob);
+            document.getElementById('audioPlayback').src = audioUrl;
+            document.getElementById('audioPlayback').classList.remove('hidden');
+
+            audioMemproses = true;
+            const reader = new FileReader();
+            reader.readAsDataURL(audioBlob);
+            reader.onloadend = () => {
+              audioBase64 = reader.result;
+              audioMemproses = false;
+            };
+          };
+
+          mediaRecorder.start();
+
+          // Speech-to-text dipisah: kalau gagal, rekaman audio tetap jalan
+          sttBlocked = false;
+          try {
+            if (recognition) recognition.start();
+          } catch (e) {
+            console.warn('Speech-to-text gagal dimulai:', e);
+          }
+
+          isRecording = true;
+
+          // UBAH TOMBOL MENJADI MERAH (AKTIF)
+          btnRekam.classList.replace('bg-blue-600', 'bg-red-600');
+          btnRekam.classList.replace('hover:bg-blue-700', 'hover:bg-red-700');
+          btnRekam.classList.add('animate-pulse'); // Tambahkan efek kedip
+          ikonRekam.innerText = '⏹';
+          teksRekam.innerText = 'Berhenti Rekam';
+          status.innerText = '🔴 Sedang merekam... Suara Anda sedang diketikkan ke kolom teks.';
+          status.classList.add('text-red-500');
+
+        } catch (err) {
+          console.error(err);
+          // Lepas mikrofon jika sempat terbuka sebelum error terjadi
+          if (stream) stream.getTracks().forEach(track => track.stop());
+
+          let petunjuk = '';
+          if (err.name === 'NotFoundError') {
+            petunjuk = 'Mikrofon tidak terdeteksi di perangkat ini.';
+          } else if (err.name === 'NotAllowedError') {
+            petunjuk = 'Izin mikrofon ditolak. Klik ikon gembok/pengaturan di kiri alamat, lalu izinkan Microphone.';
+          } else if (err.name === 'NotReadableError') {
+            petunjuk = 'Mikrofon sedang dipakai aplikasi atau tab lain.';
+          }
+          alert("Gagal merekam.\n" + petunjuk + "\n\nJenis error: " + err.name + "\nDetail: " + err.message);
+        }
+      }
+      // JIKA SEDANG MEREKAM -> BERHENTI REKAM
+      else {
+        isRecording = false; // diset dulu supaya onend tidak menyalakan ulang pengenalan suara
+        mediaRecorder.stop();
+        mediaRecorder.stream.getTracks().forEach(track => track.stop());
+        if (recognition) recognition.stop(); // Hentikan pengetikan
+
+        // KEMBALIKAN TOMBOL MENJADI BIRU (TIDAK AKTIF)
+        btnRekam.classList.replace('bg-red-600', 'bg-blue-600');
+        btnRekam.classList.replace('hover:bg-red-700', 'hover:bg-blue-700');
+        btnRekam.classList.remove('animate-pulse');
+        ikonRekam.innerText = '🎤';
+        teksRekam.innerText = 'Rekam Ulang';
+        status.innerText = 'Rekaman selesai. Anda bisa mengedit teksnya sebelum dikirim.';
+        status.classList.remove('text-red-500');
+      }
+    }
+
+    // Kode akses disimpan di browser ini supaya tidak ditanya terus
+    function ambilKodeAkses() {
+      let kode = null;
+      try { kode = localStorage.getItem('kodeAkses'); } catch (e) {}
+      if (!kode) {
+        kode = prompt('Masukkan kode akses:');
+        if (kode) {
+          kode = kode.trim();
+          try { localStorage.setItem('kodeAkses', kode); } catch (e) {}
+        }
+      }
+      return kode;
+    }
+
+    async function kirimData() {
+      const catatan = document.getElementById('catatan').value;
+      const tombolKirim = document.getElementById('btnKirim');
+      const pesanArea = document.getElementById('pesanSistem');
+
+      if (API_URL.indexOf('GANTI_') === 0) {
+        alert("API_URL di index.html belum diisi dengan URL web app (/exec).");
+        return;
+      }
+      if (isRecording) {
+        alert("Hentikan rekaman dulu sebelum mengirim data.");
+        return;
+      }
+      if (audioMemproses) {
+        alert("Audio masih diproses, coba lagi sebentar.");
+        return;
+      }
+      if (!catatan && !audioBase64) {
+        alert("Silakan isi teks atau lakukan rekaman suara terlebih dahulu.");
+        return;
+      }
+
+      const kunci = ambilKodeAkses();
+      if (!kunci) return;
+
+      // Animasi tombol saat mengirim
+      tombolKirim.innerText = "⏳ Mengirim data...";
+      tombolKirim.disabled = true;
+      tombolKirim.classList.replace('bg-green-600', 'bg-gray-400');
+      pesanArea.innerText = "Memproses dan menyimpan ke Database...";
+      pesanArea.className = "mt-4 text-center text-sm font-semibold text-blue-600";
+
+      try {
+        // text/plain menghindari preflight CORS yang tidak didukung Apps Script
+        const res = await fetch(API_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({ kunci: kunci, catatan: catatan, audio: audioBase64 })
+        });
+
+        let response;
+        try {
+          response = await res.json();
+        } catch (e) {
+          throw new Error("Respons server bukan JSON. Pastikan deployment web app diset 'Who has access: Anyone' dan URL-nya benar (/exec).");
+        }
+
+        if (response.status === 'sukses') {
+          pesanArea.innerText = "✅ " + response.pesan;
+          pesanArea.className = "mt-4 text-center text-sm font-semibold text-green-600";
+
+          // Reset form ke awal
+          document.getElementById('catatan').value = '';
+          document.getElementById('audioPlayback').classList.add('hidden');
+          document.getElementById('statusRekaman').innerText = "Form siap digunakan kembali.";
+          audioBase64 = "";
+          document.getElementById('ikonRekam').innerText = '🎤';
+          document.getElementById('teksRekam').innerText = 'Mulai Rekam Suara';
+        } else {
+          if (response.kodeSalah) {
+            try { localStorage.removeItem('kodeAkses'); } catch (e) {} // minta ulang kode pada pengiriman berikutnya
+          }
+          pesanArea.innerText = "❌ " + response.pesan;
+          pesanArea.className = "mt-4 text-center text-sm font-semibold text-red-600";
+        }
+      } catch (e) {
+        pesanArea.innerText = "❌ Gagal mengirim: " + e.message;
+        pesanArea.className = "mt-4 text-center text-sm font-semibold text-red-600";
+      } finally {
+        tombolKirim.innerText = "Kirim Data";
+        tombolKirim.disabled = false;
+        tombolKirim.classList.replace('bg-gray-400', 'bg-green-600');
+      }
+    }
+  </script>
+</body>
+</html>
